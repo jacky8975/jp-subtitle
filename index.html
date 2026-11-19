@@ -87,7 +87,20 @@ $('file').addEventListener('change', (e) => {
   $('go').disabled = !file;
 });
 
-function setStatus(t, p) { $('status').textContent = t; if (p != null) $('prog').style.width = Math.round(p*100) + '%'; }
+let running = false;
+function setStatus(t, p) {
+  $('status').textContent = t; if (p != null) $('prog').style.width = Math.round(p*100) + '%';
+  if (running) { try { localStorage.setItem('jpsub_last', JSON.stringify({ t, model: $('model').value, gpu: $('gpu').checked, at: Date.now() })); } catch (e) {} }
+}
+function clearCrashMark() { running = false; try { localStorage.removeItem('jpsub_last'); } catch (e) {} }
+(function showCrash() {
+  let d = null; try { d = JSON.parse(localStorage.getItem('jpsub_last') || 'null'); } catch (e) {}
+  if (!d || Date.now() - d.at > 3600e3) return;
+  const m = d.model.includes('small') ? 'small' : 'base';
+  $('status').textContent = `⚠️ 上次執行到一半網頁被 Safari 關掉了（${m}${d.gpu ? '＋GPU' : ''}）。\n當時進度：${d.t}\n` +
+    (m === 'small' ? '建議改選「快速（base）」再試一次。' : '建議用更短的影片，或改用 Wi-Fi 再試一次。');
+  try { localStorage.removeItem('jpsub_last'); } catch (e) {}
+})();
 
 async function decodeAudio(f) {
   const buf = await f.arrayBuffer();
@@ -233,11 +246,15 @@ $('go').addEventListener('click', async () => {
   $('go').disabled = true; $('result').classList.add('hidden'); $('editCard').classList.add('hidden');
   burnedBlob = null; $('burnOut').classList.add('hidden');
   const t0 = Date.now();
+  running = true;
   try {
     setStatus('讀取影片聲音…', 0.02);
-    const audio = await decodeAudio(file);
+    let audio;
+    try { audio = await decodeAudio(file); }
+    catch (e) { throw new Error('讀取影片聲音失敗：' + e.message); }
     segs = await runAsr(audio, $('model').value);
     if (!segs.length) { setStatus('沒有辨識到日文語音。', 1); return; }
+    setStatus('Google 翻譯中…', 0.8);
     const failed = await translateAll(segs);
     if (videoUrl) URL.revokeObjectURL(videoUrl);
     videoUrl = URL.createObjectURL(file);
@@ -247,8 +264,12 @@ $('go').addEventListener('click', async () => {
     const sec = Math.round((Date.now() - t0) / 1000);
     setStatus(`完成！共 ${segs.length} 句，花了 ${Math.floor(sec/60)} 分 ${sec%60} 秒。` + (failed ? `\n有 ${failed} 句翻譯失敗，保留日文。` : ''), 1);
   } catch (e) {
-    setStatus('發生錯誤：' + e.message + '\n影片太長或手機記憶體不足時常會這樣，可以換「快速（base）」或用短一點的影片再試。');
+    const net = /Load failed|Failed to fetch|NetworkError|下載/.test(e.message);
+    setStatus('發生錯誤：' + e.message + (net
+      ? '\n這是網路連線中斷，請改用 Wi-Fi 再按一次（已下載完成的檔案會保留，不用重抓）。'
+      : '\n如果是影片太長或記憶體不足，可以換「快速（base）」或用短一點的影片再試。'));
   } finally {
+    clearCrashMark();
     $('go').disabled = false;
   }
 });

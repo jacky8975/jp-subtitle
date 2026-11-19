@@ -6,12 +6,14 @@ env.useBrowserCache = true;
 env.backends.onnx.wasm.wasmPaths = new URL('./lib/', self.location.href).href;
 
 let asr = null;
+let lastFile = '';
 let loadedKey = '';
 
 async function load(model, useGpu) {
   const key = model + (useGpu ? ':gpu' : ':cpu');
   if (asr && loadedKey === key) return useGpu;
   const progress_callback = (p) => {
+    if (p.file) lastFile = p.file;
     if (p.status === 'progress' && p.total) {
       self.postMessage({ type: 'download', file: p.file, loaded: p.loaded, total: p.total });
     }
@@ -39,7 +41,12 @@ async function load(model, useGpu) {
 self.onmessage = async (ev) => {
   const { audio, model, useGpu } = ev.data;
   try {
-    const gpu = await load(model, useGpu);
+    let gpu;
+    try { gpu = await load(model, useGpu); }
+    catch (e) {
+      if (String(e.message) === 'GPU_UNAVAILABLE') throw e;
+      throw new Error(`下載或載入模型失敗（${lastFile || '程式庫'}）：${e.message || e}`);
+    }
     self.postMessage({ type: 'loaded', gpu });
     const SR = 16000, WIN = 30 * SR;
     const total = audio.length;
