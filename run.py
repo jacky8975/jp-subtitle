@@ -9,7 +9,7 @@ def sh(cmd):
         raise RuntimeError(r.stderr[-800:])
     return r.stdout
 
-print("🔖 版本：2026-11-19 v19（修正雙模型字幕重複顯示）")
+print("🔖 版本：2026-11-19 v20（修正直式影片字幕變形）")
 print("① 安裝需要的工具（第一次約 1 分鐘）…")
 if not os.path.exists("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"):
     sh("apt-get -qq update && apt-get -qq install -y fonts-noto-cjk > /dev/null")
@@ -209,13 +209,39 @@ def AI翻譯(lines, alts=None):
         print("   ", z)
     return out
 
-def 燒字幕(video, srt, out_path, height):
+def 影片尺寸(ffprobe_or_ffmpeg, path):
+    r = subprocess.run([ffprobe_or_ffmpeg, "-i", path], capture_output=True, text=True, errors="ignore")
+    m = re.search(r"Video:.*?(\d{2,5})x(\d{2,5})", r.stderr)
+    return (int(m[1]), int(m[2])) if m else (1280, 720)
+
+def srt轉ass(srt_text, w, h, font):
+    fs = round(min(w, h) * 0.062)
+    head = ("[Script Info]\nScriptType: v4.00+\nPlayResX: %d\nPlayResY: %d\nScaledBorderAndShadow: yes\nWrapStyle: 0\n\n"
+            "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+            "Style: Default,%s,%d,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,1,0,0,0,100,100,0,0,1,%d,0,2,%d,%d,%d,1\n\n"
+            "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+            % (w, h, font, fs, max(2, round(fs * 0.09)), round(w * 0.05), round(w * 0.05), round(h * 0.04)))
+    def t(x):
+        hh, mm, rest = x.strip().split(":"); ss, ms = rest.split(",")
+        return f"{int(hh)}:{mm}:{ss}.{int(ms)//10:02d}"
+    ev = []
+    for blk in re.split(r"\n\s*\n", srt_text.strip()):
+        lines = blk.strip().splitlines()
+        if len(lines) >= 3 and "-->" in lines[1]:
+            a, b = lines[1].split("-->")
+            txt = "\\N".join(l.replace("{", "(").replace("}", ")") for l in lines[2:])
+            ev.append(f"Dialogue: 0,{t(a)},{t(b)},Default,,0,0,0,,{txt}")
+    return head + "\n".join(ev) + "\n"
+
+
+def 燒字幕(video, srt, out_path, height=0):
+    # 用 ASS 字幕並把畫布設成影片實際大小，直式影片的字才不會被拉長變形
     work = "/content/_work"; os.makedirs(work, exist_ok=True)
-    shutil.copy(srt, f"{work}/sub.srt")
-    fs = 20  # 以 288 行高為基準，任何解析度都會自動等比例縮放
-    style = f"FontName=Noto Sans CJK TC,FontSize={fs},Outline=2,Shadow=0,MarginV=18"
+    w, h = 影片尺寸("ffmpeg", video)
+    with open(f"{work}/sub.ass", "w", encoding="utf-8") as f:
+        f.write(srt轉ass(open(srt, encoding="utf-8").read(), w, h, "Noto Sans CJK TC"))
     r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", os.path.abspath(video),
-                        "-vf", f"subtitles=sub.srt:fontsdir=/usr/share/fonts/opentype/noto:force_style='{style}'",
+                        "-vf", "ass=sub.ass:fontsdir=/usr/share/fonts/opentype/noto",
                         "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-c:a", "aac", "-b:a", "160k",
                         "-movflags", "+faststart", os.path.abspath(out_path)], cwd=work, capture_output=True, text=True)
     if r.returncode != 0:
