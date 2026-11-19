@@ -9,7 +9,7 @@ def sh(cmd):
         raise RuntimeError(r.stderr[-800:])
     return r.stdout
 
-print("🔖 版本：2026-11-19 v16（新增 Anime Whisper 辨識模型）")
+print("🔖 版本：2026-11-19 v17（Anime Whisper 字幕切得更短）")
 print("① 安裝需要的工具（第一次約 1 分鐘）…")
 if not os.path.exists("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"):
     sh("apt-get -qq update && apt-get -qq install -y fonts-noto-cjk > /dev/null")
@@ -224,8 +224,8 @@ def 辨識Anime(pipe, audio):
     """Anime Whisper 是用一句一句的配音訓練的：先用 VAD 切出每段說話，再逐段辨識，時間軸也比較準"""
     from faster_whisper.vad import get_speech_timestamps, VadOptions
     SR = 16000
-    spans = get_speech_timestamps(audio, VadOptions(min_silence_duration_ms=400, max_speech_duration_s=12,
-                                                    speech_pad_ms=200))
+    spans = get_speech_timestamps(audio, VadOptions(threshold=0.35, min_silence_duration_ms=250,
+                                                    max_speech_duration_s=6, speech_pad_ms=150))
     if not spans:
         return []
     clips = [{"raw": audio[sp["start"]:sp["end"]].copy(), "sampling_rate": SR} for sp in spans]
