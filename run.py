@@ -9,7 +9,7 @@ def sh(cmd):
         raise RuntimeError(r.stderr[-800:])
     return r.stdout
 
-print("🔖 版本：2026-11-19 v13（人名與敬稱翻法）")
+print("🔖 版本：2026-11-19 v14（新增 Qwen3 14B 翻譯選項）")
 print("① 安裝需要的工具（第一次約 1 分鐘）…")
 if not os.path.exists("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"):
     sh("apt-get -qq update && apt-get -qq install -y fonts-noto-cjk > /dev/null")
@@ -108,12 +108,17 @@ def 翻譯(lines):
 
 def AI模型():
     # 預先壓縮好的 4-bit 版本：下載量小、直接載入
+    if "Qwen3" in 翻譯方式:
+        return "unsloth/Qwen3-14B-bnb-4bit"
     return "unsloth/Qwen2.5-7B-Instruct-bnb-4bit" if "7B" in 翻譯方式 else "unsloth/Qwen2.5-14B-Instruct-bnb-4bit"
 _ai = {}
 
 def 載入AI():
-    if "m" in _ai:
+    if _ai.get("name") == AI模型():
         return _ai["tok"], _ai["m"]
+    if "m" in _ai:   # 換了模型：先釋放舊的
+        import gc, torch
+        _ai.clear(); gc.collect(); torch.cuda.empty_cache()
     print(f"  載入 AI 翻譯模型 {AI模型().split('/')[-1]}（第一次會下載，約 3–8 分鐘）…")
     sh(f"{sys.executable} -m pip install -q -U bitsandbytes accelerate opencc-python-reimplemented")
     import torch
@@ -121,7 +126,7 @@ def 載入AI():
     tok = AutoTokenizer.from_pretrained(AI模型())
     m = AutoModelForCausalLM.from_pretrained(AI模型(), device_map="cuda", torch_dtype=torch.float16)
     m.eval()
-    _ai["tok"], _ai["m"] = tok, m
+    _ai["tok"], _ai["m"], _ai["name"] = tok, m, AI模型()
     return tok, m
 
 def 解析(text, n):
@@ -173,13 +178,16 @@ def AI翻譯(lines):
                 (f"【後文，僅供參考】\n{後文}\n\n" if 後文 else "") +
                 "【請翻譯以下字幕】\n" + "\n".join(f"{k + 1}. {t}" for k, t in enumerate(group)))
         msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
-        prompt = tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False)
+        # Qwen3 預設會先「思考」再回答，翻字幕不需要，關掉以加快速度
+        prompt = tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False, enable_thinking=False)
         enc = tok(prompt, return_tensors="pt").to(m.device)
         n_in = enc["input_ids"].shape[1]
         with torch.no_grad():
             gen = m.generate(**enc, max_new_tokens=min(2048, 90 * len(group)), do_sample=False,
                              repetition_penalty=1.05, pad_token_id=tok.eos_token_id)
-        res = 解析(tok.decode(gen[0][n_in:], skip_special_tokens=True), len(group))
+        txt = tok.decode(gen[0][n_in:], skip_special_tokens=True)
+        txt = txt.split("</think>")[-1]   # 萬一還是輸出了思考內容，只留最後的答案
+        res = 解析(txt, len(group))
         for k, r in enumerate(res):
             if r:
                 out[i + k] = 轉繁(r)
