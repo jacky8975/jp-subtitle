@@ -1,13 +1,15 @@
 # 由 colab.ipynb 在執行時下載並執行；表單參數定義在筆記本裡
 import os, sys, subprocess, shutil, time, glob
 
+內容類型 = globals().get("內容類型", "成人影片")
+
 def sh(cmd):
     r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(r.stderr[-800:])
     return r.stdout
 
-print("🔖 版本：2026-11-19 v11（過濾沒人說話時的誤判字幕）")
+print("🔖 版本：2026-11-19 v12（可貼多個網址、加強辨識）")
 print("① 安裝需要的工具（第一次約 1 分鐘）…")
 if not os.path.exists("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"):
     sh("apt-get -qq update && apt-get -qq install -y fonts-noto-cjk > /dev/null")
@@ -65,7 +67,9 @@ def ts(t):
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 def 讀聲音(path):
-    out = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-vn", "-f", "s16le", "-ac", "1", "-ar", "16000", "-"],
+    # 濾掉低頻雜音、把小聲的說話放大（悄悄話、背景音樂蓋過人聲時較聽得清楚）
+    out = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-vn", "-af", "highpass=f=80,dynaudnorm=f=150:g=15",
+                          "-f", "s16le", "-ac", "1", "-ar", "16000", "-"],
                          capture_output=True)
     if not out.stdout:
         raise RuntimeError("讀不到影片的聲音：" + out.stderr.decode("utf-8", "ignore")[-300:])
@@ -138,7 +142,8 @@ SYSTEM = ("你是專業的日翻中影片字幕譯者，負責把日文字幕翻
           "3. 日文常省略主詞，請依上下文補成通順的中文，但不要加入原文沒有的資訊。\n"
           "4. 俚語、委婉說法要依語境理解意思，不要照字面直譯（例如在性相關語境中，「出る」「イク」是射精或高潮的意思）。\n"
           "5. 語音辨識可能有錯字，請依上下文推測正確意思。\n"
-          "6. 保持編號與行數完全一致，每行一句，只輸出「編號. 譯文」，不要加任何說明。")
+          "6. 如果某句明顯是語音辨識錯誤、依上下文也完全推測不出意思，就只輸出「（聽不清楚）」，不要硬翻成奇怪的句子。\n"
+          "7. 保持編號與行數完全一致，每行一句，只輸出「編號. 譯文」，不要加任何說明。")
 
 def AI翻譯(lines):
     import torch, importlib
@@ -204,7 +209,9 @@ def 辨識(model_holder, audio):
         # 沒人說話時（音樂、喘息、雜音）Whisper 容易「腦補」出字幕，以下過濾掉
         幻覺 = ["ご視聴ありがとう", "お楽しみに", "チャンネル登録", "おやすみなさい", "字幕", "最後まで"]
         segs = []
-        it = m.transcribe(audio, language="ja", vad_filter=True, beam_size=5,
+        提示 = ("成人向け動画の会話です。ズボン、勃起、チンチン、気持ちいい、イク。"
+                if 內容類型 == "成人影片" else "日本語の会話です。")
+        it = m.transcribe(audio, language="ja", vad_filter=True, beam_size=5, initial_prompt=提示,
                           condition_on_previous_text=False, no_speech_threshold=0.6,
                           vad_parameters={"min_silence_duration_ms": 500})[0]
         for s in it:
@@ -297,11 +304,13 @@ def 備用取得影片網址(url):
             print(f"  （vxTwitter 失敗：{str(e)[:80]}）")
     return list(dict.fromkeys(found))
 
-def 下載網址影片(url):
+def 下載網址影片(url, idx=1):
     """先用 yt-dlp 下載；抓不到再用備用服務取得影片網址"""
     sh(f"{sys.executable} -m pip install -q -U yt-dlp")
     import yt_dlp, requests
-    d = "/content/下載"
+    import re
+    tid = (re.search(r"/status(?:es)?/(\d+)", url) or [None, str(idx)])[1]
+    d = f"/content/下載/{idx}"
     shutil.rmtree(d, ignore_errors=True); os.makedirs(d, exist_ok=True)   # 每次清空，避免同一支影片被當成已下載
     opts = {"outtmpl": f"{d}/X_%(uploader_id)s_%(id)s_%(autonumber)s.%(ext)s",
             "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
@@ -319,7 +328,7 @@ def 下載網址影片(url):
         raise RuntimeError("備用方式也找不到影片。這則推文可能沒有影片（例如是轉推、引用或圖片），或影片已被刪除。")
     out = []
     for i, v in enumerate(vids, 1):
-        p = f"{d}/X_{i}.mp4"
+        p = f"{d}/X_{tid}" + (f"_{i}" if len(vids) > 1 else "") + ".mp4"
         with requests.get(v, stream=True, timeout=60, headers={"User-Agent": "Mozilla/5.0"}) as r:
             r.raise_for_status()
             with open(p, "wb") as f:
@@ -335,12 +344,14 @@ def 主程式():
         print("⚠️ 目前沒有 GPU，會很慢。請按上方「執行階段」→「變更執行階段類型」→ 選 T4 GPU，再執行一次。")
     from google.colab import files
     paths, 原始影片 = [], []
-    if 影片網址.strip():
-        print("📥 從網址下載影片…")
+    import re
+    網址們 = [u for u in re.split(r"[\s,，、]+", 影片網址.strip()) if u.startswith("http")]
+    for n, url in enumerate(網址們, 1):
+        print(f"📥 從網址下載影片（{n}/{len(網址們)}）…")
         try:
-            paths = 下載網址影片(影片網址.strip())
-            原始影片 = list(paths)
-            for p in paths:
+            got = 下載網址影片(url, n)
+            paths += got; 原始影片 += got
+            for p in got:
                 print(f"  已下載：{os.path.basename(p)}（{os.path.getsize(p)/1048576:.1f} MB）")
         except Exception as e:
             msg = str(e)
@@ -350,6 +361,7 @@ def 主程式():
             else:
                 print(f"  ⚠️ 下載失敗：{msg[:300]}")
                 print("     請確認網址是推文連結（x.com/…/status/…），或改用下面的「選擇檔案」上傳。")
+    if 網址們:
         if paths and 只下載不上字幕:
             for p in paths:
                 files.download(p)
