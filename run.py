@@ -9,7 +9,7 @@ def sh(cmd):
         raise RuntimeError(r.stderr[-800:])
     return r.stdout
 
-print("🔖 版本：2026-11-19 v17（Anime Whisper 字幕切得更短）")
+print("🔖 版本：2026-11-19 v18（雙模型辨識）")
 print("① 安裝需要的工具（第一次約 1 分鐘）…")
 if not os.path.exists("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"):
     sh("apt-get -qq update && apt-get -qq install -y fonts-noto-cjk > /dev/null")
@@ -147,12 +147,13 @@ SYSTEM = ("你是專業的日翻中影片字幕譯者，負責把日文字幕翻
           "3. 日文常省略主詞，請依上下文補成通順的中文，但不要加入原文沒有的資訊。\n"
           "4. 俚語、委婉說法要依語境理解意思，不要照字面直譯（例如在性相關語境中，「出る」「イク」是射精或高潮的意思）。\n"
           "5. 語音辨識可能有錯字，請依上下文推測正確意思。\n"
+          "5b. 有些句子會給兩個語音辨識候選（A、B），是兩個模型對同一段聲音的辨識結果；請依上下文判斷哪個較合理、或綜合兩者，只輸出一個譯文。\n"
           "6. 人名：漢字名照寫漢字；只有假名的名字用片假名原樣保留（例如「タツキ」）。敬稱改成中文習慣："
           "ちゃん→「小」或直接叫名字、さん→「先生／小姐／前輩」（依上下文）、くん→直接叫名字；不要寫成 -chan、-san。\n"
           "7. 如果某句明顯是語音辨識錯誤、依上下文也完全推測不出意思，就只輸出「（聽不清楚）」，不要硬翻成奇怪的句子。\n"
           "8. 保持編號與行數完全一致，每行一句，只輸出「編號. 譯文」，不要加任何說明。")
 
-def AI翻譯(lines):
+def AI翻譯(lines, alts=None):
     import torch, importlib
     tok, m = 載入AI()          # 這一步會安裝 opencc，所以要先執行
     importlib.invalidate_caches()
@@ -176,7 +177,9 @@ def AI翻譯(lines):
         後文 = "\n".join(lines[i + B:i + B + 5])
         user = ((f"【前文與已完成的翻譯，僅供參考】\n{前文}\n\n" if 前文 else "") +
                 (f"【後文，僅供參考】\n{後文}\n\n" if 後文 else "") +
-                "【請翻譯以下字幕】\n" + "\n".join(f"{k + 1}. {t}" for k, t in enumerate(group)))
+                "【請翻譯以下字幕】\n" + "\n".join(
+                    f"{k + 1}. A：{t} ／ B：{alts[i + k]}" if alts and alts[i + k] and alts[i + k] != t
+                    else f"{k + 1}. {t}" for k, t in enumerate(group)))
         msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
         # Qwen3 預設會先「思考」再回答，翻字幕不需要，關掉以加快速度
         prompt = tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False, enable_thinking=False)
@@ -244,9 +247,26 @@ def 辨識Anime(pipe, audio):
         segs.append((st, en, t)); print(f"  {ts(st)[3:8]}  {t}")
     return segs
 
+_候選 = {"alt": None}   # 雙模型時，另一個模型的辨識結果（與字幕逐句對應）
+
 def 辨識(model_holder, audio):
+    _候選["alt"] = None
     if model_holder.get("anime"):
-        return 辨識Anime(model_holder["m"], audio)
+        segs = 辨識Anime(model_holder["m"], audio)
+        if model_holder.get("turbo") is not None and segs:
+            print("  用 large-v3-turbo 再聽一次，產生第二份候選…")
+            SR, alt = 16000, []
+            for st, en, _ in segs:
+                clip = audio[int(st * SR):int(en * SR)]
+                try:
+                    r = model_holder["turbo"].transcribe(clip, language="ja", beam_size=5, vad_filter=False,
+                                                         condition_on_previous_text=False, without_timestamps=True)[0]
+                    alt.append("".join(x.text for x in r).strip())
+                except Exception as e:
+                    print(f"  （第二份候選失敗：{str(e)[:80]}，只用 Anime Whisper）")
+                    alt = None; break
+            _候選["alt"] = alt
+        return segs
     def run(m):
         # 沒人說話時（音樂、喘息、雜音）Whisper 容易「腦補」出字幕，以下過濾掉
         幻覺 = ["ご視聴ありがとう", "お楽しみに", "チャンネル登録", "おやすみなさい", "字幕", "最後まで"]
@@ -300,7 +320,7 @@ def 處理(path, model):
     if 翻譯方式.startswith("AI"):
         print(f"④ AI 翻譯成繁體中文（共 {len(segs)} 句）…")
         try:
-            zh = AI翻譯(ja)
+            zh = AI翻譯(ja, _候選["alt"])
         except Exception as e:
             import traceback
             print(f"  ⚠️ AI 翻譯失敗：{type(e).__name__}: {str(e)[:300]}")
@@ -424,14 +444,22 @@ def 主程式():
         print("檢查 GPU 函式庫…")
         gpu = 補GPU函式庫()
     model = None
-    if 模型.startswith("anime"):
+    雙模型 = 模型.startswith("雙模型")
+    if 模型.startswith("anime") or 雙模型:
         print("\n載入辨識模型 Anime Whisper（日文配音專用，第一次會下載約 1.5GB）…")
         try:
-            model = {"m": 載入AnimeWhisper(gpu), "gpu": gpu, "anime": True}
+            model = {"m": 載入AnimeWhisper(gpu), "gpu": gpu, "anime": True, "turbo": None}
         except Exception as e:
             print(f"  ⚠️ Anime Whisper 載入失敗（{str(e)[:200]}），改用 large-v3-turbo…")
+        if model is not None and 雙模型:
+            print("載入第二個辨識模型 large-v3-turbo（第一次會下載約 1.6GB）…")
+            try:
+                model["turbo"] = WhisperModel("large-v3-turbo" if gpu else "small", device="cuda" if gpu else "cpu",
+                                              compute_type="float16" if gpu else "int8")
+            except Exception as e:
+                print(f"  ⚠️ 第二個模型載入失敗（{str(e)[:120]}），只用 Anime Whisper")
     if model is None:
-        name = "large-v3-turbo" if 模型.startswith("anime") else 模型
+        name = "large-v3-turbo" if (模型.startswith("anime") or 模型.startswith("雙模型")) else 模型
         name = name if gpu else ("small" if name == "large-v3-turbo" else name)
         print(f"\n載入辨識模型 {name}（第一次會下載，約 1–3 分鐘）…")
         model = {"m": WhisperModel(name, device="cuda" if gpu else "cpu", compute_type="float16" if gpu else "int8"), "gpu": gpu}
