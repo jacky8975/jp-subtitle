@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="日文字幕">
+<title>日文影片上中文字幕</title>
+<style>
+  :root { --bg:#f6f5f2; --card:#fff; --ink:#1d1d1f; --mute:#6e6e73; --line:#e3e1dc; --accent:#c2410c; --ok:#15803d; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111; --card:#1c1c1e; --ink:#f2f2f7; --mute:#98989f; --line:#2c2c2e; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 -apple-system, "PingFang TC", "Noto Sans TC", sans-serif;
+         padding: calc(env(safe-area-inset-top) + 12px) 14px calc(env(safe-area-inset-bottom) + 40px); }
+  main { max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 4px 0 2px; }
+  .sub { color: var(--mute); font-size: 14px; margin: 0 0 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+  .step { font-size: 13px; color: var(--mute); font-weight: 600; letter-spacing: .04em; margin-bottom: 8px; }
+  label.file { display:block; text-align:center; padding: 18px; border: 2px dashed var(--line); border-radius: 12px; cursor: pointer; }
+  label.file input { display:none; }
+  .row { display:flex; gap: 8px; flex-wrap: wrap; align-items:center; }
+  select, button { font: inherit; border-radius: 10px; border: 1px solid var(--line); padding: 10px 14px; background: var(--card); color: var(--ink); }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; width: 100%; }
+  button:disabled { opacity: .45; }
+  .bar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; margin: 10px 0 6px; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  #status { font-size: 14px; color: var(--mute); white-space: pre-line; }
+  video { width: 100%; border-radius: 10px; background: #000; margin-top: 6px; }
+  .seg { border-top: 1px solid var(--line); padding: 8px 0; }
+  .seg:first-child { border-top: 0; }
+  .t { font-size: 12px; color: var(--mute); font-variant-numeric: tabular-nums; }
+  .ja { font-size: 13px; color: var(--mute); }
+  .seg textarea { width:100%; font: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; background: transparent; color: var(--ink); resize: vertical; min-height: 2.2em; }
+  .note { font-size: 13px; color: var(--mute); }
+  .hidden { display: none; }
+  #segs { max-height: 50vh; overflow: auto; }
+</style>
+</head>
+<body>
+<main>
+  <h1>日文影片上中文字幕</h1>
+  <p class="sub">全部在你的手機上處理；只有翻譯時會把字幕文字送到線上翻譯（Google，失敗時改用 MyMemory）。</p>
+
+  <div class="card">
+    <div class="step">① 選影片</div>
+    <label class="file"><input id="file" type="file" accept="video/*,audio/*"><span id="fileLabel">點這裡選擇影片</span></label>
+    <div class="row" style="margin-top:10px">
+      <select id="model">
+        <option value="Xenova/whisper-small">準確（small，首次下載約 250MB）</option>
+        <option value="Xenova/whisper-base">快速（base，首次下載約 80MB）</option>
+      </select>
+      <label class="note"><input type="checkbox" id="gpu"> 嘗試 GPU 加速（較快，但可能不穩）</label>
+    </div>
+    <p class="note">建議 5 分鐘以內的影片。處理時請保持螢幕亮著、不要切換 App。</p>
+    <button id="go" class="primary" disabled>開始產生字幕</button>
+    <div class="bar"><div id="prog"></div></div>
+    <div id="status">尚未開始</div>
+  </div>
+
+  <div id="result" class="card hidden">
+    <div class="step">② 預覽（可直接在播放器看字幕）</div>
+    <video id="player" controls playsinline></video>
+    <div class="row" style="margin-top:10px">
+      <button id="dlSrt">下載 .srt 字幕檔</button>
+      <button id="burn">製作有字幕的影片</button>
+    </div>
+    <p class="note" id="burnNote">「製作有字幕的影片」會把影片完整播放一次並錄下來，影片多長就要多久，期間請不要切換 App。</p>
+    <div id="burnOut" class="row hidden" style="margin-top:6px">
+      <button id="dlVideo" class="primary">儲存有字幕的影片</button>
+    </div>
+  </div>
+
+  <div id="editCard" class="card hidden">
+    <div class="step">③ 字幕內容（可直接修改中文）</div>
+    <div id="segs"></div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let file = null, segs = [], vttUrl = null, videoUrl = null, burnedBlob = null, burnedName = '';
+
+$('file').addEventListener('change', (e) => {
+  file = e.target.files[0] || null;
+  $('fileLabel').textContent = file ? `已選：${file.name}（${(file.size/1048576).toFixed(1)} MB）` : '點這裡選擇影片';
+  $('go').disabled = !file;
+});
+
+function setStatus(t, p) { $('status').textContent = t; if (p != null) $('prog').style.width = Math.round(p*100) + '%'; }
+
+async function decodeAudio(f) {
+  const buf = await f.arrayBuffer();
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ac = new AC();
+  let decoded;
+  try { decoded = await ac.decodeAudioData(buf); }
+  finally { ac.close && ac.close(); }
+  const SR = 16000;
+  const off = new OfflineAudioContext(1, Math.ceil(decoded.duration * SR), SR);
+  const src = off.createBufferSource(); src.buffer = decoded; src.connect(off.destination); src.start();
+  const rendered = await off.startRendering();
+  return rendered.getChannelData(0);
+}
+
+function runAsrOnce(audio, model, useGpu) {
+  return new Promise((resolve, reject) => {
+    const w = new Worker('./asr-worker.js', { type: 'module' });
+    const out = [];
+    const files = {};
+    w.onmessage = (ev) => {
+      const m = ev.data;
+      if (m.type === 'download') {
+        files[m.file] = [m.loaded, m.total];
+        let l = 0, t = 0; for (const k in files) { l += files[k][0]; t += files[k][1]; }
+        setStatus(`下載語音辨識模型 ${(l/1048576).toFixed(0)} / ${(t/1048576).toFixed(0)} MB（只有第一次需要）`, l / t * 0.3);
+      } else if (m.type === 'loaded') {
+        setStatus(`辨識日文語音中…${m.gpu ? '（GPU 加速）' : ''}`, 0.3);
+      } else if (m.type === 'segments') {
+        out.push(...m.segs);
+        setStatus(`辨識日文語音中… ${Math.round(m.done*100)}%\n最新：${m.segs.length ? m.segs[m.segs.length-1].ja : ''}`, 0.3 + m.done * 0.5);
+      } else if (m.type === 'log') {
+        console.log(m.text);
+      } else if (m.type === 'finished') {
+        w.terminate(); resolve(out);
+      } else if (m.type === 'error') {
+        w.terminate(); reject(new Error(m.text));
+      }
+    };
+    w.onerror = (e) => { reject(new Error(e.message || '辨識程式載入失敗')); };
+    w.postMessage({ audio, model, useGpu });
+  });
+}
+
+async function runAsr(audio, model) {
+  const want = $('gpu').checked && !!navigator.gpu;
+  try { return await runAsrOnce(audio, model, want); }
+  catch (e) {
+    if (want && /GPU_UNAVAILABLE/.test(e.message)) { setStatus('GPU 加速無法使用，改用一般模式…', 0.05); return await runAsrOnce(audio, model, false); }
+    throw e;
+  }
+}
+
+let useBackup = false;
+async function backupTrans(text) {
+  const url = 'https://api.mymemory.translated.net/get?langpair=ja|zh-TW&q=' + encodeURIComponent(text);
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const d = await r.json();
+  if (d.responseStatus != 200) throw new Error(d.responseDetails || 'backup failed');
+  return d.responseData.translatedText;
+}
+async function gtrans(text) {
+  if (useBackup) return backupTrans(text);
+  try { return await googleTrans(text); }
+  catch (e) { useBackup = true; return backupTrans(text); }
+}
+async function googleTrans(text) {
+  const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=ja&tl=zh-TW&dt=t&q=' + encodeURIComponent(text);
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const d = await r.json();
+  return d[0].map(x => x[0]).join('');
+}
+
+async function translateAll(list) {
+  let failed = 0; useBackup = false;
+  const BATCH = 15;
+  for (let i = 0; i < list.length; i += BATCH) {
+    const group = list.slice(i, i + BATCH);
+    let ok = false;
+    try {
+      const res = (await gtrans(group.map(s => s.ja.replace(/\n/g, ' ')).join('\n'))).split('\n');
+      if (res.length === group.length) { group.forEach((s, k) => s.zh = res[k].trim()); ok = true; }
+    } catch (e) {}
+    if (!ok) {
+      for (const s of group) {
+        try { s.zh = (await gtrans(s.ja)).trim(); } catch (e) { s.zh = s.ja; failed++; }
+      }
+    }
+    setStatus(`Google 翻譯中… ${Math.min(i + BATCH, list.length)} / ${list.length}`, 0.8 + 0.2 * Math.min(1, (i + BATCH) / list.length));
+  }
+  return failed;
+}
+
+const fmt = (t, sep) => {
+  const ms = Math.max(0, Math.round(t * 1000));
+  const h = Math.floor(ms / 3600000), m = Math.floor(ms / 60000) % 60, s = Math.floor(ms / 1000) % 60, x = ms % 1000;
+  const p = (n, w = 2) => String(n).padStart(w, '0');
+  return `${p(h)}:${p(m)}:${p(s)}${sep}${p(x, 3)}`;
+};
+const toSrt = () => segs.map((s, i) => `${i+1}\n${fmt(s.start, ',')} --> ${fmt(s.end, ',')}\n${s.zh}\n`).join('\n');
+const toVtt = () => 'WEBVTT\n\n' + segs.map(s => `${fmt(s.start, '.')} --> ${fmt(s.end, '.')}\n${s.zh}\n`).join('\n');
+
+function refreshPlayer() {
+  const v = $('player');
+  [...v.querySelectorAll('track')].forEach(t => t.remove());
+  if (vttUrl) URL.revokeObjectURL(vttUrl);
+  vttUrl = URL.createObjectURL(new Blob([toVtt()], { type: 'text/vtt' }));
+  const tr = document.createElement('track');
+  tr.kind = 'subtitles'; tr.label = '中文'; tr.srclang = 'zh-TW'; tr.src = vttUrl; tr.default = true;
+  v.appendChild(tr);
+  tr.addEventListener('load', () => { tr.track.mode = 'showing'; });
+  setTimeout(() => { if (v.textTracks[0]) v.textTracks[0].mode = 'showing'; }, 300);
+}
+
+function renderSegs() {
+  const box = $('segs'); box.innerHTML = '';
+  segs.forEach((s) => {
+    const d = document.createElement('div'); d.className = 'seg';
+    d.innerHTML = `<div class="t">${fmt(s.start, '.').slice(3, 8)} – ${fmt(s.end, '.').slice(3, 8)}</div><div class="ja"></div><textarea rows="2"></textarea>`;
+    d.querySelector('.ja').textContent = s.ja;
+    const ta = d.querySelector('textarea'); ta.value = s.zh;
+    ta.addEventListener('change', () => { s.zh = ta.value.trim(); refreshPlayer(); burnedBlob = null; $('burnOut').classList.add('hidden'); });
+    box.appendChild(d);
+  });
+}
+
+const baseName = () => (file ? file.name.replace(/\.[^.]+$/, '') : 'video');
+
+async function saveBlob(blob, name) {
+  const f = new File([blob], name, { type: blob.type });
+  if (navigator.canShare && navigator.canShare({ files: [f] })) {
+    try { await navigator.share({ files: [f] }); return; } catch (e) { if (e.name === 'AbortError') return; }
+  }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+}
+
+$('go').addEventListener('click', async () => {
+  if (!file) return;
+  $('go').disabled = true; $('result').classList.add('hidden'); $('editCard').classList.add('hidden');
+  burnedBlob = null; $('burnOut').classList.add('hidden');
+  const t0 = Date.now();
+  try {
+    setStatus('讀取影片聲音…', 0.02);
+    const audio = await decodeAudio(file);
+    segs = await runAsr(audio, $('model').value);
+    if (!segs.length) { setStatus('沒有辨識到日文語音。', 1); return; }
+    const failed = await translateAll(segs);
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
+    videoUrl = URL.createObjectURL(file);
+    $('player').src = videoUrl;
+    refreshPlayer(); renderSegs();
+    $('result').classList.remove('hidden'); $('editCard').classList.remove('hidden');
+    const sec = Math.round((Date.now() - t0) / 1000);
+    setStatus(`完成！共 ${segs.length} 句，花了 ${Math.floor(sec/60)} 分 ${sec%60} 秒。` + (failed ? `\n有 ${failed} 句翻譯失敗，保留日文。` : ''), 1);
+  } catch (e) {
+    setStatus('發生錯誤：' + e.message + '\n影片太長或手機記憶體不足時常會這樣，可以換「快速（base）」或用短一點的影片再試。');
+  } finally {
+    $('go').disabled = false;
+  }
+});
+
+$('dlSrt').addEventListener('click', () => saveBlob(new Blob([toSrt()], { type: 'application/x-subrip' }), baseName() + '_中文字幕.srt'));
+
+function wrapLines(ctx, text, maxW) {
+  const lines = []; let cur = '';
+  for (const ch of text) {
+    if (ch === '\n') { lines.push(cur); cur = ''; continue; }
+    if (ctx.measureText(cur + ch).width > maxW && cur) { lines.push(cur); cur = ch; } else cur += ch;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+$('burn').addEventListener('click', async () => {
+  if (!segs.length) return;
+  if (burnedBlob) { $('burnOut').classList.remove('hidden'); return; }
+  const btn = $('burn'); btn.disabled = true; $('dlSrt').disabled = true;
+  const v = document.createElement('video');
+  v.src = videoUrl; v.playsInline = true; v.preload = 'auto';
+  try {
+    await new Promise((res, rej) => { v.onloadedmetadata = res; v.onerror = () => rej(new Error('影片無法播放')); });
+    let W = v.videoWidth, H = v.videoHeight;
+    if (W > 1280) { H = Math.round(H * 1280 / W); W = 1280; }
+    W -= W % 2; H -= H % 2;
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    const ctx = c.getContext('2d');
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const ac = new AC();
+    const src = ac.createMediaElementSource(v);
+    const dest = ac.createMediaStreamDestination();
+    src.connect(dest);
+    const stream = new MediaStream([...c.captureStream(30).getVideoTracks(), ...dest.stream.getAudioTracks()]);
+    const mime = ['video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4', 'video/webm'].find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m));
+    if (!mime) throw new Error('這台裝置不支援錄製影片');
+    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 2_500_000 });
+    const chunks = []; rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+    const fontPx = Math.round(H * 0.055);
+    const draw = () => {
+      ctx.drawImage(v, 0, 0, W, H);
+      const t = v.currentTime;
+      const s = segs.find(x => t >= x.start && t < x.end);
+      if (s && s.zh) {
+        ctx.font = `600 ${fontPx}px -apple-system, "PingFang TC", sans-serif`;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+        ctx.lineJoin = 'round'; ctx.lineWidth = Math.max(3, fontPx * 0.16);
+        const lines = wrapLines(ctx, s.zh, W * 0.9);
+        lines.forEach((ln, i) => {
+          const y = H - fontPx * 0.6 - (lines.length - 1 - i) * fontPx * 1.25;
+          ctx.strokeStyle = 'rgba(0,0,0,.85)'; ctx.strokeText(ln, W / 2, y);
+          ctx.fillStyle = '#fff'; ctx.fillText(ln, W / 2, y);
+        });
+      }
+      const pct = v.duration ? v.currentTime / v.duration : 0;
+      setStatus(`錄製有字幕的影片中… ${Math.round(pct*100)}%（請保持在這個畫面）`, pct);
+      if (!v.paused && !v.ended) requestAnimationFrame(draw);
+    };
+    const done = new Promise((res) => { rec.onstop = res; });
+    v.onended = () => { draw(); setTimeout(() => rec.stop(), 200); };
+    rec.start(1000);
+    await ac.resume();
+    await v.play();
+    requestAnimationFrame(draw);
+    await done;
+    ac.close && ac.close();
+    const realType = (rec.mimeType || mime).split(';')[0];
+    burnedBlob = new Blob(chunks, { type: realType });
+    burnedName = baseName() + '_中文字幕.' + (realType.includes('mp4') ? 'mp4' : 'webm');
+    $('burnOut').classList.remove('hidden');
+    setStatus(`有字幕的影片做好了（${(burnedBlob.size/1048576).toFixed(1)} MB），按「儲存有字幕的影片」。`, 1);
+  } catch (e) {
+    setStatus('製作影片失敗：' + e.message + '\n字幕檔（.srt）仍可正常下載。');
+  } finally {
+    btn.disabled = false; $('dlSrt').disabled = false;
+  }
+});
+
+$('dlVideo').addEventListener('click', () => burnedBlob && saveBlob(burnedBlob, burnedName));
+</script>
+</body>
+</html>
