@@ -9,7 +9,7 @@ def sh(cmd):
         raise RuntimeError(r.stderr[-800:])
     return r.stdout
 
-print("🔖 版本：2026-11-19 v15（預設 Qwen3 14B）")
+print("🔖 版本：2026-11-19 v16（新增 Anime Whisper 辨識模型）")
 print("① 安裝需要的工具（第一次約 1 分鐘）…")
 if not os.path.exists("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"):
     sh("apt-get -qq update && apt-get -qq install -y fonts-noto-cjk > /dev/null")
@@ -214,7 +214,39 @@ def 燒字幕(video, srt, out_path, height):
     if r.returncode != 0:
         raise RuntimeError("燒字幕失敗：" + r.stderr[-500:])
 
+def 載入AnimeWhisper(gpu):
+    import torch
+    from transformers import pipeline
+    return pipeline("automatic-speech-recognition", model="litagin/anime-whisper",
+                    device="cuda" if gpu else "cpu", torch_dtype=torch.float16 if gpu else torch.float32)
+
+def 辨識Anime(pipe, audio):
+    """Anime Whisper 是用一句一句的配音訓練的：先用 VAD 切出每段說話，再逐段辨識，時間軸也比較準"""
+    from faster_whisper.vad import get_speech_timestamps, VadOptions
+    SR = 16000
+    spans = get_speech_timestamps(audio, VadOptions(min_silence_duration_ms=400, max_speech_duration_s=12,
+                                                    speech_pad_ms=200))
+    if not spans:
+        return []
+    clips = [{"raw": audio[sp["start"]:sp["end"]].copy(), "sampling_rate": SR} for sp in spans]
+    # 依作者建議：不要給提示詞、不要壓重複（喘息聲本來就會重複）
+    outs = pipe(clips, batch_size=16,
+                generate_kwargs={"language": "Japanese", "no_repeat_ngram_size": 0, "repetition_penalty": 1.0})
+    幻覺 = ["ご視聴ありがとう", "チャンネル登録", "字幕"]
+    segs = []
+    for sp, o in zip(spans, outs):
+        t = (o.get("text") or "").strip()
+        if not t:
+            continue
+        if any(h in t for h in 幻覺) and len(t) < 20:
+            print(f"  （略過常見的誤判字幕：{t}）"); continue
+        st, en = sp["start"] / SR, sp["end"] / SR
+        segs.append((st, en, t)); print(f"  {ts(st)[3:8]}  {t}")
+    return segs
+
 def 辨識(model_holder, audio):
+    if model_holder.get("anime"):
+        return 辨識Anime(model_holder["m"], audio)
     def run(m):
         # 沒人說話時（音樂、喘息、雜音）Whisper 容易「腦補」出字幕，以下過濾掉
         幻覺 = ["ご視聴ありがとう", "お楽しみに", "チャンネル登録", "おやすみなさい", "字幕", "最後まで"]
@@ -391,9 +423,18 @@ def 主程式():
     if gpu:
         print("檢查 GPU 函式庫…")
         gpu = 補GPU函式庫()
-    name = 模型 if gpu else ("small" if 模型 == "large-v3-turbo" else 模型)
-    print(f"\n載入辨識模型 {name}（第一次會下載，約 1–3 分鐘）…")
-    model = {"m": WhisperModel(name, device="cuda" if gpu else "cpu", compute_type="float16" if gpu else "int8"), "gpu": gpu}
+    model = None
+    if 模型.startswith("anime"):
+        print("\n載入辨識模型 Anime Whisper（日文配音專用，第一次會下載約 1.5GB）…")
+        try:
+            model = {"m": 載入AnimeWhisper(gpu), "gpu": gpu, "anime": True}
+        except Exception as e:
+            print(f"  ⚠️ Anime Whisper 載入失敗（{str(e)[:200]}），改用 large-v3-turbo…")
+    if model is None:
+        name = "large-v3-turbo" if 模型.startswith("anime") else 模型
+        name = name if gpu else ("small" if name == "large-v3-turbo" else name)
+        print(f"\n載入辨識模型 {name}（第一次會下載，約 1–3 分鐘）…")
+        model = {"m": WhisperModel(name, device="cuda" if gpu else "cpu", compute_type="float16" if gpu else "int8"), "gpu": gpu}
     results = []   # 沒勾「只下載不上字幕」時，只給有字幕的版本
     for fn in paths:
         print(f"\n===== {os.path.basename(fn)} =====")
