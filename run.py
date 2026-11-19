@@ -9,7 +9,7 @@ def sh(cmd):
         raise RuntimeError(r.stderr[-800:])
     return r.stdout
 
-print("🔖 版本：2026-11-19 v18（雙模型辨識）")
+print("🔖 版本：2026-11-19 v19（修正雙模型字幕重複顯示）")
 print("① 安裝需要的工具（第一次約 1 分鐘）…")
 if not os.path.exists("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"):
     sh("apt-get -qq update && apt-get -qq install -y fonts-noto-cjk > /dev/null")
@@ -147,7 +147,7 @@ SYSTEM = ("你是專業的日翻中影片字幕譯者，負責把日文字幕翻
           "3. 日文常省略主詞，請依上下文補成通順的中文，但不要加入原文沒有的資訊。\n"
           "4. 俚語、委婉說法要依語境理解意思，不要照字面直譯（例如在性相關語境中，「出る」「イク」是射精或高潮的意思）。\n"
           "5. 語音辨識可能有錯字，請依上下文推測正確意思。\n"
-          "5b. 有些句子會給兩個語音辨識候選（A、B），是兩個模型對同一段聲音的辨識結果；請依上下文判斷哪個較合理、或綜合兩者，只輸出一個譯文。\n"
+          "5b. 有時會附上「另一個辨識結果」：那是另一個模型對同一段聲音的辨識。請依上下文判斷哪個較合理（或綜合兩者），每句只輸出一個中文譯文，不要把兩個版本都寫出來。\n"
           "6. 人名：漢字名照寫漢字；只有假名的名字用片假名原樣保留（例如「タツキ」）。敬稱改成中文習慣："
           "ちゃん→「小」或直接叫名字、さん→「先生／小姐／前輩」（依上下文）、くん→直接叫名字；不要寫成 -chan、-san。\n"
           "7. 如果某句明顯是語音辨識錯誤、依上下文也完全推測不出意思，就只輸出「（聽不清楚）」，不要硬翻成奇怪的句子。\n"
@@ -177,9 +177,11 @@ def AI翻譯(lines, alts=None):
         後文 = "\n".join(lines[i + B:i + B + 5])
         user = ((f"【前文與已完成的翻譯，僅供參考】\n{前文}\n\n" if 前文 else "") +
                 (f"【後文，僅供參考】\n{後文}\n\n" if 後文 else "") +
-                "【請翻譯以下字幕】\n" + "\n".join(
-                    f"{k + 1}. A：{t} ／ B：{alts[i + k]}" if alts and alts[i + k] and alts[i + k] != t
-                    else f"{k + 1}. {t}" for k, t in enumerate(group)))
+                "【請翻譯以下字幕】\n" + "\n".join(f"{k + 1}. {t}" for k, t in enumerate(group)) +
+                ("\n\n【同一段聲音的另一個辨識結果，僅供參考：上面某句明顯聽錯時，改參考這裡同編號的句子】\n" +
+                 "\n".join(f"{k + 1}. {alts[i + k]}" for k in range(len(group))
+                           if alts[i + k] and alts[i + k] != group[k])
+                 if alts and any(alts[i + k] and alts[i + k] != group[k] for k in range(len(group))) else ""))
         msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
         # Qwen3 預設會先「思考」再回答，翻字幕不需要，關掉以加快速度
         prompt = tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False, enable_thinking=False)
@@ -192,6 +194,8 @@ def AI翻譯(lines, alts=None):
         txt = txt.split("</think>")[-1]   # 萬一還是輸出了思考內容，只留最後的答案
         res = 解析(txt, len(group))
         for k, r in enumerate(res):
+            if r and "A：" in r and "B：" in r:   # 萬一還是兩個版本都寫出來，只留第一個
+                r = r.split("B：")[0].replace("A：", "").strip(" ／/")
             if r:
                 out[i + k] = 轉繁(r)
         print(f"  AI 翻譯 {min(i + B, len(lines))}/{len(lines)} 句完成")
