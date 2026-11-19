@@ -39,8 +39,7 @@ async function load(model, useGpu) {
 }
 
 self.onmessage = async (ev) => {
-  // 每個 Worker 只處理一段（約 30 秒），處理完由主程式關掉，以釋放記憶體
-  const { audio, model, useGpu, offset } = ev.data;
+  const { audio, model, useGpu } = ev.data;
   try {
     let gpu;
     try { gpu = await load(model, useGpu); }
@@ -49,19 +48,27 @@ self.onmessage = async (ev) => {
       throw new Error(`下載或載入模型失敗（${lastFile || '程式庫'}）：${e.message || e}`);
     }
     self.postMessage({ type: 'loaded', gpu });
-    const chunkDur = audio.length / 16000;
-    const out = await asr(audio, { language: 'japanese', task: 'transcribe', return_timestamps: true });
-    const segs = [];
-    for (const c of out.chunks || []) {
-      const text = (c.text || '').trim();
-      if (!text) continue;
-      let [s, e] = c.timestamp;
-      s = (s ?? 0) + offset;
-      e = (e ?? chunkDur) + offset;
-      if (e <= s) e = s + 1.5;
-      segs.push({ start: s, end: Math.min(e, offset + chunkDur), ja: text });
+    const SR = 16000, WIN = 30 * SR;
+    const total = audio.length;
+    for (let start = 0; start < total; start += WIN) {
+      const chunk = audio.subarray(start, Math.min(total, start + WIN));
+      if (chunk.length < SR * 0.5) break;
+      const out = await asr(chunk, { language: 'japanese', task: 'transcribe', return_timestamps: true });
+      const offset = start / SR;
+      const chunkDur = chunk.length / SR;
+      const segs = [];
+      for (const c of out.chunks || []) {
+        const text = (c.text || '').trim();
+        if (!text) continue;
+        let [s, e] = c.timestamp;
+        s = (s ?? 0) + offset;
+        e = (e ?? chunkDur) + offset;
+        if (e <= s) e = s + 1.5;
+        segs.push({ start: s, end: Math.min(e, offset + chunkDur), ja: text });
+      }
+      self.postMessage({ type: 'segments', segs, done: Math.min(total, start + WIN) / total });
     }
-    self.postMessage({ type: 'segments', segs });
+    self.postMessage({ type: 'finished' });
   } catch (e) {
     self.postMessage({ type: 'error', text: String(e && e.message || e) });
   }

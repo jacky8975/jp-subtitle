@@ -116,42 +116,33 @@ async function decodeAudio(f) {
   return rendered.getChannelData(0);
 }
 
-const dlFiles = {};
-function runChunk(chunk, offset, model, useGpu, idx, n) {
+function runAsrOnce(audio, model, useGpu) {
   return new Promise((resolve, reject) => {
-    const w = new Worker('./asr-worker.js?v=3', { type: 'module' });
+    const w = new Worker('./asr-worker.js', { type: 'module' });
+    const out = [];
+    const files = {};
     w.onmessage = (ev) => {
       const m = ev.data;
       if (m.type === 'download') {
-        dlFiles[m.file] = [m.loaded, m.total];
-        let l = 0, t = 0; for (const k in dlFiles) { l += dlFiles[k][0]; t += dlFiles[k][1]; }
+        files[m.file] = [m.loaded, m.total];
+        let l = 0, t = 0; for (const k in files) { l += files[k][0]; t += files[k][1]; }
         setStatus(`下載語音辨識模型 ${(l/1048576).toFixed(0)} / ${(t/1048576).toFixed(0)} MB（只有第一次需要）`, l / t * 0.3);
       } else if (m.type === 'loaded') {
-        setStatus(`辨識日文語音中… 第 ${idx + 1} / ${n} 段${m.gpu ? '（GPU 加速）' : ''}`, 0.3 + 0.5 * idx / n);
+        setStatus(`辨識日文語音中…${m.gpu ? '（GPU 加速）' : ''}`, 0.3);
       } else if (m.type === 'segments') {
-        w.terminate(); resolve(m.segs);
+        out.push(...m.segs);
+        setStatus(`辨識日文語音中… ${Math.round(m.done*100)}%\n最新：${m.segs.length ? m.segs[m.segs.length-1].ja : ''}`, 0.3 + m.done * 0.5);
+      } else if (m.type === 'log') {
+        console.log(m.text);
+      } else if (m.type === 'finished') {
+        w.terminate(); resolve(out);
       } else if (m.type === 'error') {
         w.terminate(); reject(new Error(m.text));
       }
     };
-    w.onerror = (e) => { w.terminate(); reject(new Error(e.message || '辨識程式載入失敗')); };
-    w.postMessage({ audio: chunk, model, useGpu, offset });
+    w.onerror = (e) => { reject(new Error(e.message || '辨識程式載入失敗')); };
+    w.postMessage({ audio, model, useGpu });
   });
-}
-
-async function runAsrOnce(audio, model, useGpu) {
-  const SR = 16000, WIN = 30 * SR;
-  const n = Math.ceil(audio.length / WIN);
-  const out = [];
-  for (let i = 0; i < n; i++) {
-    const chunk = audio.slice(i * WIN, Math.min(audio.length, (i + 1) * WIN));
-    if (chunk.length < SR * 0.5) break;
-    const segs = await runChunk(chunk, i * 30, model, useGpu, i, n);
-    out.push(...segs);
-    setStatus(`辨識日文語音中… ${i + 1} / ${n} 段完成\n最新：${segs.length ? segs[segs.length - 1].ja : '（這段沒有說話）'}`, 0.3 + 0.5 * (i + 1) / n);
-    await new Promise(r => setTimeout(r, 300));
-  }
-  return out;
 }
 
 async function runAsr(audio, model) {
