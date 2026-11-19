@@ -7,7 +7,7 @@ def sh(cmd):
         raise RuntimeError(r.stderr[-800:])
     return r.stdout
 
-print("🔖 版本：2026-11-19 v10（上字幕時只輸出字幕版）")
+print("🔖 版本：2026-11-19 v11（過濾沒人說話時的誤判字幕）")
 print("① 安裝需要的工具（第一次約 1 分鐘）…")
 if not os.path.exists("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"):
     sh("apt-get -qq update && apt-get -qq install -y fonts-noto-cjk > /dev/null")
@@ -201,11 +201,22 @@ def 燒字幕(video, srt, out_path, height):
 
 def 辨識(model_holder, audio):
     def run(m):
+        # 沒人說話時（音樂、喘息、雜音）Whisper 容易「腦補」出字幕，以下過濾掉
+        幻覺 = ["ご視聴ありがとう", "お楽しみに", "チャンネル登録", "おやすみなさい", "字幕", "最後まで"]
         segs = []
-        for s in m.transcribe(audio, language="ja", vad_filter=True, beam_size=5)[0]:
+        it = m.transcribe(audio, language="ja", vad_filter=True, beam_size=5,
+                          condition_on_previous_text=False, no_speech_threshold=0.6,
+                          vad_parameters={"min_silence_duration_ms": 500})[0]
+        for s in it:
             t = s.text.strip()
-            if t:
-                segs.append((s.start, s.end, t)); print(f"  {ts(s.start)[3:8]}  {t}")
+            if not t:
+                continue
+            if s.no_speech_prob > 0.6 and s.avg_logprob < -0.7:
+                print(f"  （略過可能是雜音的片段：{t}）"); continue
+            if any(h in t for h in 幻覺) and len(t) < 20:
+                print(f"  （略過常見的誤判字幕：{t}）"); continue
+            end = min(s.end, s.start + min(7.0, 1.5 + 0.3 * len(t)))   # 字幕最長顯示時間，避免停在畫面上太久
+            segs.append((s.start, end, t)); print(f"  {ts(s.start)[3:8]}  {t}")
         return segs
     try:
         return run(model_holder["m"])
