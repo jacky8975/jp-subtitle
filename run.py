@@ -7,7 +7,7 @@ def sh(cmd):
         raise RuntimeError(r.stderr[-800:])
     return r.stdout
 
-print("🔖 版本：2026-11-19 v9（含 X 備用下載）")
+print("🔖 版本：2026-11-19 v10（上字幕時只輸出字幕版）")
 print("① 安裝需要的工具（第一次約 1 分鐘）…")
 if not os.path.exists("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"):
     sh("apt-get -qq update && apt-get -qq install -y fonts-noto-cjk > /dev/null")
@@ -361,15 +361,15 @@ def 主程式():
     name = 模型 if gpu else ("small" if 模型 == "large-v3-turbo" else 模型)
     print(f"\n載入辨識模型 {name}（第一次會下載，約 1–3 分鐘）…")
     model = {"m": WhisperModel(name, device="cuda" if gpu else "cpu", compute_type="float16" if gpu else "int8"), "gpu": gpu}
-    results = list(原始影片)
+    results = []   # 沒勾「只下載不上字幕」時，只給有字幕的版本
     for fn in paths:
         print(f"\n===== {os.path.basename(fn)} =====")
         try:
             results += 處理(fn, model)
         except Exception as e:
             print(f"❌ 處理失敗：{e}")
-    if len(results) == len(原始影片):
-        if not results: return
+    if not results:
+        return
     if 存到雲端硬碟:
         from google.colab import drive
         drive.mount("/content/drive")
