@@ -9,7 +9,7 @@ def sh(cmd):
         raise RuntimeError(r.stderr[-800:])
     return r.stdout
 
-print("🔖 版本：2026-11-21 v21（修正多支影片記憶體不足、re 錯誤）")
+print("🔖 版本：2026-11-21 v22（修正 v21 下載功能遺失）")
 print("① 安裝需要的工具（第一次約 1 分鐘）…")
 if not os.path.exists("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"):
     sh("apt-get -qq update && apt-get -qq install -y fonts-noto-cjk > /dev/null")
@@ -373,6 +373,65 @@ def 處理翻譯燒錄(job):
     mp4 = f"/content/{base}_中文字幕.mp4"
     燒字幕(src, srt, mp4)
     return [mp4, srt]
+
+def 備用取得影片網址(url):
+    """yt-dlp 抓不到時（例如敏感內容要登入），改問 FxTwitter / vxTwitter 要影片網址"""
+    import re, requests
+    m = re.search(r"/status(?:es)?/(\d+)", url)
+    if not m:
+        return []
+    tid = m.group(1)
+    found = []
+    try:
+        j = requests.get(f"https://api.fxtwitter.com/status/{tid}", timeout=20).json()
+        tw = j.get("tweet") or {}
+        for src in [tw, tw.get("quote") or {}]:
+            for v in ((src.get("media") or {}).get("videos") or []):
+                if v.get("url"): found.append(v["url"])
+    except Exception as e:
+        print(f"  （FxTwitter 失敗：{str(e)[:80]}）")
+    if not found:
+        try:
+            j = requests.get(f"https://api.vxtwitter.com/Twitter/status/{tid}", timeout=20).json()
+            for src in [j, j.get("qrt") or {}]:
+                for mm in (src.get("media_extended") or []):
+                    if mm.get("type") in ("video", "gif") and mm.get("url"): found.append(mm["url"])
+        except Exception as e:
+            print(f"  （vxTwitter 失敗：{str(e)[:80]}）")
+    return list(dict.fromkeys(found))
+
+def 下載網址影片(url, idx=1):
+    """先用 yt-dlp 下載；抓不到再用備用服務取得影片網址"""
+    sh(f"{sys.executable} -m pip install -q -U yt-dlp")
+    import yt_dlp, requests
+    import re
+    tid = (re.search(r"/status(?:es)?/(\d+)", url) or [None, str(idx)])[1]
+    d = f"/content/下載/{idx}"
+    shutil.rmtree(d, ignore_errors=True); os.makedirs(d, exist_ok=True)   # 每次清空，避免同一支影片被當成已下載
+    opts = {"outtmpl": f"{d}/X_%(uploader_id)s_%(id)s_%(autonumber)s.%(ext)s",
+            "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+            "merge_output_format": "mp4", "quiet": True, "no_warnings": True}
+    try:
+        with yt_dlp.YoutubeDL(opts) as y:
+            y.download([url])
+        got = sorted(glob.glob(f"{d}/*.mp4"))
+        if got:
+            return got
+    except Exception as e:
+        print(f"  yt-dlp 抓不到（{str(e)[:120]}），改用備用方式…")
+    vids = 備用取得影片網址(url)
+    if not vids:
+        raise RuntimeError("備用方式也找不到影片。這則推文可能沒有影片（例如是轉推、引用或圖片），或影片已被刪除。")
+    out = []
+    for i, v in enumerate(vids, 1):
+        p = f"{d}/X_{tid}" + (f"_{i}" if len(vids) > 1 else "") + ".mp4"
+        with requests.get(v, stream=True, timeout=60, headers={"User-Agent": "Mozilla/5.0"}) as r:
+            r.raise_for_status()
+            with open(p, "wb") as f:
+                for chunk in r.iter_content(1 << 20):
+                    f.write(chunk)
+        out.append(p)
+    return out
 
 def 主程式():
     import torch
