@@ -1,5 +1,5 @@
 # 由 colab.ipynb 在執行時下載並執行；表單參數定義在筆記本裡
-import os, sys, subprocess, shutil, time, glob
+import os, sys, subprocess, shutil, time, glob, re, gc
 
 內容類型 = globals().get("內容類型", "成人影片")
 
@@ -9,7 +9,7 @@ def sh(cmd):
         raise RuntimeError(r.stderr[-800:])
     return r.stdout
 
-print("🔖 版本：2026-11-19 v20（修正直式影片字幕變形）")
+print("🔖 版本：2026-11-21 v21（修正多支影片記憶體不足、re 錯誤）")
 print("① 安裝需要的工具（第一次約 1 分鐘）…")
 if not os.path.exists("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"):
     sh("apt-get -qq update && apt-get -qq install -y fonts-noto-cjk > /dev/null")
@@ -327,7 +327,8 @@ def 辨識(model_holder, audio):
             return run(model_holder["m"])
         raise
 
-def 處理(path, model):
+def 處理辨識(path, model):
+    """第一階段：剪片段＋語音辨識（只用辨識模型）"""
     base = os.path.splitext(os.path.basename(path))[0]
     a, b = 秒數(開始), 秒數(結束)
     src = path
@@ -344,13 +345,18 @@ def 處理(path, model):
     print("③ 辨識日文語音…")
     segs = 辨識(model, 讀聲音(src))
     if not segs:
-        print("沒有辨識到日文語音。"); return []
+        print("沒有辨識到日文語音。"); return None
+    return {"base": base, "src": src, "segs": segs, "alt": _候選["alt"]}
+
+def 處理翻譯燒錄(job):
+    """第二階段：翻譯＋燒字幕（辨識模型已釋放，GPU 留給 AI 翻譯）"""
+    base, src, segs = job["base"], job["src"], job["segs"]
     ja = [s[2] for s in segs]
     zh = None
     if 翻譯方式.startswith("AI"):
         print(f"④ AI 翻譯成繁體中文（共 {len(segs)} 句）…")
         try:
-            zh = AI翻譯(ja, _候選["alt"])
+            zh = AI翻譯(ja, job["alt"])
         except Exception as e:
             import traceback
             print(f"  ⚠️ AI 翻譯失敗：{type(e).__name__}: {str(e)[:300]}")
@@ -364,70 +370,9 @@ def 處理(path, model):
         for i, ((st, en, _), z) in enumerate(zip(segs, zh), 1):
             f.write(f"{i}\n{ts(st)} --> {ts(en)}\n{z}\n\n")
     print("⑤ 把字幕燒進影片…")
-    h = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=height",
-                        "-of", "csv=p=0", src], capture_output=True, text=True).stdout.strip()
     mp4 = f"/content/{base}_中文字幕.mp4"
-    燒字幕(src, srt, mp4, int(h) if h.isdigit() else 0)
+    燒字幕(src, srt, mp4)
     return [mp4, srt]
-
-def 備用取得影片網址(url):
-    """yt-dlp 抓不到時（例如敏感內容要登入），改問 FxTwitter / vxTwitter 要影片網址"""
-    import re, requests
-    m = re.search(r"/status(?:es)?/(\d+)", url)
-    if not m:
-        return []
-    tid = m.group(1)
-    found = []
-    try:
-        j = requests.get(f"https://api.fxtwitter.com/status/{tid}", timeout=20).json()
-        tw = j.get("tweet") or {}
-        for src in [tw, tw.get("quote") or {}]:
-            for v in ((src.get("media") or {}).get("videos") or []):
-                if v.get("url"): found.append(v["url"])
-    except Exception as e:
-        print(f"  （FxTwitter 失敗：{str(e)[:80]}）")
-    if not found:
-        try:
-            j = requests.get(f"https://api.vxtwitter.com/Twitter/status/{tid}", timeout=20).json()
-            for src in [j, j.get("qrt") or {}]:
-                for mm in (src.get("media_extended") or []):
-                    if mm.get("type") in ("video", "gif") and mm.get("url"): found.append(mm["url"])
-        except Exception as e:
-            print(f"  （vxTwitter 失敗：{str(e)[:80]}）")
-    return list(dict.fromkeys(found))
-
-def 下載網址影片(url, idx=1):
-    """先用 yt-dlp 下載；抓不到再用備用服務取得影片網址"""
-    sh(f"{sys.executable} -m pip install -q -U yt-dlp")
-    import yt_dlp, requests
-    import re
-    tid = (re.search(r"/status(?:es)?/(\d+)", url) or [None, str(idx)])[1]
-    d = f"/content/下載/{idx}"
-    shutil.rmtree(d, ignore_errors=True); os.makedirs(d, exist_ok=True)   # 每次清空，避免同一支影片被當成已下載
-    opts = {"outtmpl": f"{d}/X_%(uploader_id)s_%(id)s_%(autonumber)s.%(ext)s",
-            "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
-            "merge_output_format": "mp4", "quiet": True, "no_warnings": True}
-    try:
-        with yt_dlp.YoutubeDL(opts) as y:
-            y.download([url])
-        got = sorted(glob.glob(f"{d}/*.mp4"))
-        if got:
-            return got
-    except Exception as e:
-        print(f"  yt-dlp 抓不到（{str(e)[:120]}），改用備用方式…")
-    vids = 備用取得影片網址(url)
-    if not vids:
-        raise RuntimeError("備用方式也找不到影片。這則推文可能沒有影片（例如是轉推、引用或圖片），或影片已被刪除。")
-    out = []
-    for i, v in enumerate(vids, 1):
-        p = f"{d}/X_{tid}" + (f"_{i}" if len(vids) > 1 else "") + ".mp4"
-        with requests.get(v, stream=True, timeout=60, headers={"User-Agent": "Mozilla/5.0"}) as r:
-            r.raise_for_status()
-            with open(p, "wb") as f:
-                for chunk in r.iter_content(1 << 20):
-                    f.write(chunk)
-        out.append(p)
-    return out
 
 def 主程式():
     import torch
@@ -493,11 +438,27 @@ def 主程式():
         name = name if gpu else ("small" if name == "large-v3-turbo" else name)
         print(f"\n載入辨識模型 {name}（第一次會下載，約 1–3 分鐘）…")
         model = {"m": WhisperModel(name, device="cuda" if gpu else "cpu", compute_type="float16" if gpu else "int8"), "gpu": gpu}
-    results = []   # 沒勾「只下載不上字幕」時，只給有字幕的版本
+    # 第一階段：所有影片先辨識完
+    jobs = []
     for fn in paths:
-        print(f"\n===== {os.path.basename(fn)} =====")
+        print(f"\n===== {os.path.basename(fn)}：辨識 =====")
         try:
-            results += 處理(fn, model)
+            j = 處理辨識(fn, model)
+            if j: jobs.append(j)
+        except Exception as e:
+            print(f"❌ 辨識失敗：{e}")
+    # 釋放辨識模型，把 GPU 記憶體留給 AI 翻譯（避免 CUDA out of memory）
+    model.clear(); del model; gc.collect()
+    try:
+        import torch; torch.cuda.empty_cache()
+    except Exception:
+        pass
+    # 第二階段：逐支翻譯＋燒字幕（AI 模型只載入一次）
+    results = []   # 沒勾「只下載不上字幕」時，只給有字幕的版本
+    for j in jobs:
+        print(f"\n===== {j['base']}：翻譯＋上字幕 =====")
+        try:
+            results += 處理翻譯燒錄(j)
         except Exception as e:
             print(f"❌ 處理失敗：{e}")
     if not results:
