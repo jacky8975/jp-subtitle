@@ -9,7 +9,7 @@ def sh(cmd):
         raise RuntimeError(r.stderr[-800:])
     return r.stdout
 
-print("🔖 版本：2026-11-21 v22（修正 v21 下載功能遺失）")
+print("🔖 版本：2026-11-21 v23（加強過濾「謝謝收看」類誤判）")
 print("① 安裝需要的工具（第一次約 1 分鐘）…")
 if not os.path.exists("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"):
     sh("apt-get -qq update && apt-get -qq install -y fonts-noto-cjk > /dev/null")
@@ -265,7 +265,7 @@ def 辨識Anime(pipe, audio):
     # 依作者建議：不要給提示詞、不要壓重複（喘息聲本來就會重複）
     outs = pipe(clips, batch_size=16,
                 generate_kwargs={"language": "Japanese", "no_repeat_ngram_size": 0, "repetition_penalty": 1.0})
-    幻覺 = ["ご視聴ありがとう", "チャンネル登録", "字幕"]
+    幻覺 = ["ご視聴ありがとう", "チャンネル登録", "字幕", "ご覧いただき", "見てくれてありがとう", "見ていただき", "おつかれさまでした", "お楽しみに"]
     segs = []
     for sp, o in zip(spans, outs):
         t = (o.get("text") or "").strip()
@@ -299,7 +299,7 @@ def 辨識(model_holder, audio):
         return segs
     def run(m):
         # 沒人說話時（音樂、喘息、雜音）Whisper 容易「腦補」出字幕，以下過濾掉
-        幻覺 = ["ご視聴ありがとう", "お楽しみに", "チャンネル登録", "おやすみなさい", "字幕", "最後まで"]
+        幻覺 = ["ご視聴ありがとう", "お楽しみに", "チャンネル登録", "おやすみなさい", "字幕", "最後まで", "ご覧いただき", "見てくれてありがとう", "見ていただき"]
         segs = []
         提示 = ("成人向け動画の会話です。ズボン、勃起、チンチン、気持ちいい、イク。"
                 if 內容類型 == "成人影片" else "日本語の会話です。")
