@@ -9,7 +9,7 @@ def sh(cmd):
         raise RuntimeError(r.stderr[-800:])
     return r.stdout
 
-print("🔖 版本：2026-11-21 v23（加強過濾「謝謝收看」類誤判）")
+print("🔖 版本：2026-11-21 v24（雲端硬碟一開始就連、每支做完立刻存）")
 print("① 安裝需要的工具（第一次約 1 分鐘）…")
 if not os.path.exists("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"):
     sh("apt-get -qq update && apt-get -qq install -y fonts-noto-cjk > /dev/null")
@@ -439,6 +439,13 @@ def 主程式():
     if not gpu:
         print("⚠️ 目前沒有 GPU，會很慢。請按上方「執行階段」→「變更執行階段類型」→ 選 T4 GPU，再執行一次。")
     from google.colab import files
+    雲端資料夾 = None
+    if 存到雲端硬碟:
+        # 一開始就連雲端硬碟：授權視窗出現在開頭，之後每做完一支就馬上存，斷線也不會白跑
+        print("☁️ 連接 Google 雲端硬碟（請在跳出的視窗按允許）…")
+        from google.colab import drive
+        drive.mount("/content/drive")
+        雲端資料夾 = "/content/drive/MyDrive/日文影片中文字幕"; os.makedirs(雲端資料夾, exist_ok=True)
     paths, 原始影片 = [], []
     import re
     網址們 = [u for u in re.split(r"[\s,，、]+", 影片網址.strip()) if u.startswith("http")]
@@ -461,11 +468,8 @@ def 主程式():
         if paths and 只下載不上字幕:
             for p in paths:
                 files.download(p)
-            if 存到雲端硬碟:
-                from google.colab import drive
-                drive.mount("/content/drive")
-                dd = "/content/drive/MyDrive/日文影片中文字幕"; os.makedirs(dd, exist_ok=True)
-                for p in paths: shutil.copy(p, dd)
+            if 雲端資料夾:
+                for p in paths: shutil.copy(p, 雲端資料夾)
                 print("☁️ 已存到 Google 雲端硬碟：我的雲端硬碟 / 日文影片中文字幕")
             print("✅ 下載完成！"); return
     if not paths:
@@ -517,17 +521,20 @@ def 主程式():
     for j in jobs:
         print(f"\n===== {j['base']}：翻譯＋上字幕 =====")
         try:
-            results += 處理翻譯燒錄(j)
+            out = 處理翻譯燒錄(j)
+            results += out
+            if 雲端資料夾:
+                for p in out: shutil.copy(p, 雲端資料夾)
+                print(f"  ☁️ 已存到雲端硬碟：{os.path.basename(out[0])}")
         except Exception as e:
             print(f"❌ 處理失敗：{e}")
     if not results:
         return
-    if 存到雲端硬碟:
-        from google.colab import drive
-        drive.mount("/content/drive")
-        d = "/content/drive/MyDrive/日文影片中文字幕"; os.makedirs(d, exist_ok=True)
-        for p in results: shutil.copy(p, d)
-        print(f"\n☁️ 已存到 Google 雲端硬碟：我的雲端硬碟 / 日文影片中文字幕")
+    if 雲端資料夾:
+        # 已存雲端就不再用瀏覽器下載（大檔在 iPad 上常卡住），直接到雲端硬碟 App 看
+        print("\n✅ 完成！全部已存到 Google 雲端硬碟：我的雲端硬碟 / 日文影片中文字幕")
+        for p in results: print("  ", os.path.basename(p))
+        return
     print("\n✅ 完成！下載檔案：")
     for p in results:
         print("  ", os.path.basename(p))
